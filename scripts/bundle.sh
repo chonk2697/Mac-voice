@@ -24,6 +24,15 @@ if [[ -z "$IDENTITY" ]]; then
   IDENTITY="$(security find-identity -v -p codesigning 2>/dev/null \
     | awk -F'"' '/Apple Development/ {print $2; exit}')"
 fi
-codesign --force --sign "${IDENTITY:--}" --timestamp=none "$APP"
+if [[ -n "$IDENTITY" ]]; then
+  codesign --force --sign "$IDENTITY" --timestamp=none "$APP"
+else
+  # Ad-hoc signatures normally get a designated requirement tied to the
+  # binary's hash, so every rebuild looks like a new app to the microphone
+  # permission system. Pin the requirement to the bundle identifier instead,
+  # so the permission granted once keeps applying to later builds.
+  codesign --force --sign - --timestamp=none \
+    --requirements '=designated => identifier "com.zoezyla.voice"' "$APP"
+fi
 
 echo "Built $APP (signed with: ${IDENTITY:-ad-hoc})"

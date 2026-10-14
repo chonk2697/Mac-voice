@@ -91,6 +91,10 @@ public struct AnalyzerConfiguration: Sendable, Equatable {
     /// Vocal tract length estimates outside this range are discarded as
     /// implausible for an adult.
     public var vocalTractLengthRange = 9.0...23.0
+    /// Formant sets with F1 or F2 above these are discarded; they come from
+    /// clicks, breaths and other non-speech sounds rather than vowels.
+    public var maxF1 = 1200.0
+    public var maxF2 = 3600.0
 
     public init() {}
 }
@@ -161,7 +165,9 @@ public final class VoiceAnalyzer {
         frame.pitch = pitch.frequency
         frame.clarity = pitch.clarity
 
-        let formants = formantEstimator.estimate(ring.latest(formantEstimator.requiredSamples))
+        var formants = formantEstimator.estimate(ring.latest(formantEstimator.requiredSamples))
+        if let f1 = formants.first?.frequency, f1 > configuration.maxF1 { formants = [] }
+        if formants.count > 1, formants[1].frequency > configuration.maxF2 { formants = [] }
         frame.formants = formants
         if formants.count >= 2,
            let length = VocalTract.length(formants: formants.map(\.frequency)),
