@@ -1,5 +1,8 @@
 import AVFoundation
 import Foundation
+import os
+
+nonisolated private let log = Logger(subsystem: "com.zoezyla.voice", category: "capture")
 
 /// Captures the default microphone and delivers 16 kHz mono float chunks on
 /// an audio thread. Restarts itself when the input device changes.
@@ -24,7 +27,9 @@ nonisolated final class AudioCapture: @unchecked Sendable {
             forName: .AVAudioEngineConfigurationChange, object: engine, queue: nil
         ) { [weak self] _ in
             // The input format may have changed (new device); rebuild the tap.
-            DispatchQueue.global(qos: .userInitiated).async { self?.restart() }
+            guard let self else { return }
+            log.info("Audio configuration changed; restarting capture")
+            DispatchQueue.global(qos: .userInitiated).async { self.restart() }
         }
     }
 
@@ -111,6 +116,7 @@ nonisolated final class AudioCapture: @unchecked Sendable {
         }
         engine.prepare()
         try engine.start()
+        log.info("Capturing \(Int(inputFormat.sampleRate)) Hz, \(inputFormat.channelCount) ch, converting to 16 kHz mono")
     }
 
     enum CaptureError: Error, LocalizedError {

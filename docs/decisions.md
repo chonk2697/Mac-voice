@@ -60,10 +60,14 @@ discussed.
 13. **Weight.** Default: H1 minus H2 with formant correction (H1* minus H2*),
     shown as a light-to-heavy gauge. Lower values mean heavier. The same
     measure appears in other tools as "softness" with the sign flipped.
-14. **Brightness.** Open. Candidate definition: spectral centroid of voiced
-    frames, emphasising the 2 to 4 kHz band, shown only as a trend against the
-    user's own baseline and marked experimental. It is a composite cue that
-    responds to resonance, weight and twang, so it may prove redundant.
+14. **Brightness.** Decided: experimental trend. Measured as the alpha ratio
+    (level of the 1 to 5 kHz band minus the 50 Hz to 1 kHz band, in dB), a
+    standard voice measure; higher is brighter. A plain spectral centroid was
+    tried first and rejected because the fundamental dominates it, so it
+    mostly tracked pitch. Shown as its raw value and, once a baseline exists,
+    as the change against the baseline. Marked experimental in the panel; it
+    responds to resonance, weight and twang together, so it may prove
+    redundant.
 15. **Targets.** Default: presets (feminine, masculine, androgynous) plus
     custom ranges; in-range colouring; numbers always visible.
 16. **Baseline.** Decided via 12: in the MVP. Record roughly ten seconds of

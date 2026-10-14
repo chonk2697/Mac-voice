@@ -2,6 +2,9 @@ import AVFoundation
 import Foundation
 import Observation
 import VoiceAnalysis
+import os
+
+private let log = Logger(subsystem: "com.zoezyla.voice", category: "monitor")
 
 /// Owns the analyzer and runs it off the main actor. When idle it only checks
 /// the input level, and wakes itself on the first loud enough chunk.
@@ -47,7 +50,9 @@ final class VoiceMonitor {
 
     let settings: AppSettings
     let session = VoiceSession()
-    private(set) var state: State = .stopped
+    private(set) var state: State = .stopped {
+        didSet { if state != oldValue { log.info("State: \(self.state.title, privacy: .public)") } }
+    }
     private(set) var level: Double = -120
     private(set) var isVoiced = false
     private(set) var current: [Metric: Double] = [:]
@@ -58,7 +63,7 @@ final class VoiceMonitor {
     @ObservationIgnored private var capture: AudioCapture?
     @ObservationIgnored private var displayTask: Task<Void, Never>?
     @ObservationIgnored private var lastSpeech = Date()
-    @ObservationIgnored private var pendingFrames: [VoiceFrame] = []
+    @ObservationIgnored private var ticks = 0
 
     init(settings: AppSettings) {
         self.settings = settings
@@ -141,6 +146,8 @@ final class VoiceMonitor {
     private func refreshDisplay() {
         current = session.current
         now = session.now
+        ticks += 1
+        if ticks % Int(VoiceMonitor.displayRate * 5) == 0 { logSummary() }
         if let frame = session.lastFrame {
             level = frame.level
             isVoiced = frame.isVoiced && !session.current.isEmpty
@@ -156,6 +163,21 @@ final class VoiceMonitor {
             state = .idle
             Task { await engine.setIdle(true) }
         }
+    }
+
+    /// Five-second summary in the system log, so the pipeline can be checked
+    /// without looking at the screen. Numbers only, never audio.
+    private func logSummary() {
+        let voiced = session.recentMedian(.pitch, window: 5) != nil
+        guard voiced else {
+            log.debug("Last 5 s: no voiced speech (level \(Int(self.level)) dB)")
+            return
+        }
+        func m(_ metric: Metric) -> String {
+            session.recentMedian(metric, window: 5).map { String(format: "%.1f", $0) } ?? "–"
+        }
+        let text = "pitch \(m(.pitch)) Hz, F1-3 \(m(.f1))/\(m(.f2))/\(m(.f3)) Hz, VTL \(m(.vocalTractLength)) cm, H1-H2 \(m(.h1h2)) dB, alpha \(m(.alphaRatio)) dB"
+        log.info("Last 5 s medians: \(text, privacy: .public)")
     }
 
     // MARK: Baseline
