@@ -78,10 +78,19 @@ public struct AnalyzerConfiguration: Sendable, Equatable {
     public var hop = 320
     /// Frames quieter than this are treated as silence.
     public var levelGateDb = -50.0
-    public var minPitch = 60.0
+    /// Voicing also requires this much energy inside `speechBand`, which keeps
+    /// mains hum and rumble from counting as speech.
+    public var speechBandGateDb = -50.0
+    public var speechBand = 200.0...4000.0
+    /// High-pass cutoff applied to the input; 0 disables it.
+    public var highPassHz = 75.0
+    public var minPitch = 65.0
     public var maxPitch = 600.0
     /// Centroid band in Hz.
     public var centroidBand = 100.0...8000.0
+    /// Vocal tract length estimates outside this range are discarded as
+    /// implausible for an adult.
+    public var vocalTractLengthRange = 9.0...23.0
 
     public init() {}
 }
@@ -95,6 +104,7 @@ public final class VoiceAnalyzer {
     private let formantEstimator: FormantEstimator
     private let spectrumAnalyzer: SpectrumAnalyzer
     private var ring: RingBuffer
+    private var highPass: HighPassFilter?
     private var samplesSinceHop = 0
     private var samplesSeen = 0
     private let levelWindow: Int
@@ -107,13 +117,17 @@ public final class VoiceAnalyzer {
         formantEstimator = FormantEstimator(sampleRate: rate)
         spectrumAnalyzer = SpectrumAnalyzer(sampleRate: rate)
         levelWindow = Int(0.032 * rate)
+        if configuration.highPassHz > 0 {
+            highPass = HighPassFilter(sampleRate: rate, cutoff: configuration.highPassHz)
+        }
         let needed = max(pitchDetector.requiredSamples, formantEstimator.requiredSamples,
                          spectrumAnalyzer.requiredSamples, levelWindow)
         ring = RingBuffer(capacity: needed * 2)
     }
 
     /// Appends samples and returns a frame for every hop boundary crossed.
-    public func process(_ samples: [Float]) -> [VoiceFrame] {
+    public func process(_ input: [Float]) -> [VoiceFrame] {
+        let samples = highPass != nil ? highPass!.process(input) : input
         var frames: [VoiceFrame] = []
         var offset = 0
         while offset < samples.count {
@@ -135,7 +149,11 @@ public final class VoiceAnalyzer {
         let level = Double(Signal.decibels(Signal.rms(ring.latest(levelWindow))))
         var frame = VoiceFrame(time: time, level: level)
         guard level >= configuration.levelGateDb,
-              ring.filled >= pitchDetector.requiredSamples,
+              ring.filled >= max(pitchDetector.requiredSamples, spectrumAnalyzer.requiredSamples),
+              let spectrum = spectrumAnalyzer.spectrum(ring.latest(spectrumAnalyzer.requiredSamples)),
+              let speechLevel = spectrum.bandLevel(from: configuration.speechBand.lowerBound,
+                                                   to: configuration.speechBand.upperBound),
+              speechLevel >= configuration.speechBandGateDb,
               let pitch = pitchDetector.estimate(ring.latest(pitchDetector.requiredSamples)) else {
             return frame
         }
@@ -145,17 +163,17 @@ public final class VoiceAnalyzer {
 
         let formants = formantEstimator.estimate(ring.latest(formantEstimator.requiredSamples))
         frame.formants = formants
-        if formants.count >= 2 {
-            frame.vocalTractLength = VocalTract.length(formants: formants.map(\.frequency))
+        if formants.count >= 2,
+           let length = VocalTract.length(formants: formants.map(\.frequency)),
+           configuration.vocalTractLengthRange.contains(length) {
+            frame.vocalTractLength = length
         }
-        if let spectrum = spectrumAnalyzer.spectrum(ring.latest(spectrumAnalyzer.requiredSamples)) {
-            frame.h1h2 = formants.isEmpty
-                ? HarmonicMeasures.h1h2(spectrum: spectrum, f0: pitch.frequency)
-                : HarmonicMeasures.correctedH1H2(spectrum: spectrum, f0: pitch.frequency, formants: formants)
-            frame.centroid = spectrum.centroid(from: configuration.centroidBand.lowerBound,
-                                               to: configuration.centroidBand.upperBound)
-            frame.alphaRatio = spectrum.alphaRatio()
-        }
+        frame.h1h2 = formants.isEmpty
+            ? HarmonicMeasures.h1h2(spectrum: spectrum, f0: pitch.frequency)
+            : HarmonicMeasures.correctedH1H2(spectrum: spectrum, f0: pitch.frequency, formants: formants)
+        frame.centroid = spectrum.centroid(from: configuration.centroidBand.lowerBound,
+                                           to: configuration.centroidBand.upperBound)
+        frame.alphaRatio = spectrum.alphaRatio()
         return frame
     }
 }
