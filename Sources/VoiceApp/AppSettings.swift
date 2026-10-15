@@ -79,6 +79,7 @@ final class AppSettings {
         var chartWindow: ChartWindow = .thirtySeconds
         var baseline: VoiceProfile?
         var calibration = Calibration()
+        var inputDeviceUID: String?
     }
 
     private static let key = "settings"
@@ -94,6 +95,8 @@ final class AppSettings {
     var chartWindow: ChartWindow { didSet { save() } }
     var baseline: VoiceProfile? { didSet { save() } }
     var calibration: Calibration { didSet { save() } }
+    /// Core Audio device UID of the chosen input; nil follows the system default.
+    var inputDeviceUID: String? { didSet { save() } }
 
     init() {
         var stored = Stored()
@@ -111,13 +114,15 @@ final class AppSettings {
         chartWindow = stored.chartWindow
         baseline = stored.baseline
         calibration = stored.calibration
+        inputDeviceUID = stored.inputDeviceUID
     }
 
     private func save() {
         let stored = Stored(enabledIndicators: enabledIndicators, barIndicators: barIndicators,
                             preset: preset, customPitchLow: customPitchLow, customPitchHigh: customPitchHigh,
                             autoIdleEnabled: autoIdleEnabled, autoIdleMinutes: autoIdleMinutes,
-                            chartWindow: chartWindow, baseline: baseline, calibration: calibration)
+                            chartWindow: chartWindow, baseline: baseline, calibration: calibration,
+                            inputDeviceUID: inputDeviceUID)
         if let data = try? JSONEncoder().encode(stored) {
             UserDefaults.standard.set(data, forKey: AppSettings.key)
         }

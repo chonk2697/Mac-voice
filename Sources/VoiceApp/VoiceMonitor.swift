@@ -58,17 +58,50 @@ final class VoiceMonitor {
     private(set) var current: [Metric: Double] = [:]
     private(set) var now: TimeInterval = 0
     private(set) var baselineProgress: Double?
+    /// Input devices currently attached, refreshed when the system reports a change.
+    private(set) var inputDevices: [AudioInputDevice] = []
+    /// Name of the device being captured, for the panel.
+    private(set) var activeInputName: String?
 
     private let engine = AnalysisEngine()
     @ObservationIgnored private var capture: AudioCapture?
     @ObservationIgnored private var displayTask: Task<Void, Never>?
     @ObservationIgnored private var lastSpeech = Date()
     @ObservationIgnored private var ticks = 0
+    @ObservationIgnored private var deviceObserver: AudioDevices.ChangeToken?
 
     init(settings: AppSettings) {
         self.settings = settings
         session.baseline = settings.baseline
+        inputDevices = AudioDevices.inputDevices()
+        log.info("Input devices: \(self.inputDevices.map(\.name).joined(separator: ", "), privacy: .public)")
+        deviceObserver = AudioDevices.observeChanges { [weak self] in
+            Task { @MainActor in self?.devicesChanged() }
+        }
     }
+
+    // MARK: Input devices
+
+    private func devicesChanged() {
+        inputDevices = AudioDevices.inputDevices()
+        let names = inputDevices.map(\.name).joined(separator: ", ")
+        log.info("Input devices: \(names, privacy: .public)")
+        // The engine restarts itself on configuration changes; just refresh the label.
+        Task { @MainActor in
+            try? await Task.sleep(for: .milliseconds(500))
+            self.activeInputName = self.capture?.activeDeviceName
+        }
+    }
+
+    /// Selects an input by device UID, or nil for the system default.
+    func selectInput(uid: String?) {
+        settings.inputDeviceUID = uid
+        capture?.setPreferredDevice(uid: uid)
+        activeInputName = capture?.activeDeviceName
+    }
+
+    /// True when the chosen device is not attached and the default is in use.
+    var isUsingFallbackInput: Bool { capture?.isUsingFallback ?? false }
 
     // MARK: Lifecycle
 
@@ -95,9 +128,11 @@ final class VoiceMonitor {
                 await self?.enqueue(frames)
             }
         }
+        capture.setPreferredDevice(uid: settings.inputDeviceUID)
         do {
             try capture.start()
             self.capture = capture
+            activeInputName = capture.activeDeviceName
             state = .listening
             lastSpeech = .now
             startDisplayLoop()

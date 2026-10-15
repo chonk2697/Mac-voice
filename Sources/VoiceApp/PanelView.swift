@@ -26,6 +26,7 @@ struct PanelView: View {
 
             Divider()
             controls
+            inputPicker
             Divider()
             IndicatorToggles(settings: settings)
             Divider()
@@ -84,6 +85,34 @@ struct PanelView: View {
                 }
             }
             .frame(width: 180, alignment: .trailing)
+        }
+    }
+
+    private var inputPicker: some View {
+        let settings = monitor.settings
+        let selected = settings.inputDeviceUID
+        let missing = selected != nil && !monitor.inputDevices.contains { $0.uid == selected }
+        return HStack(spacing: 8) {
+            Text("Input").font(.callout)
+            Picker("Input", selection: Binding(
+                get: { settings.inputDeviceUID ?? "" },
+                set: { monitor.selectInput(uid: $0.isEmpty ? nil : $0) }
+            )) {
+                Text("System default").tag("")
+                ForEach(monitor.inputDevices) { device in
+                    Text(device.name).tag(device.uid)
+                }
+                if missing, let selected {
+                    Text("Chosen device (not attached)").tag(selected)
+                }
+            }
+            .labelsHidden()
+            .frame(maxWidth: .infinity)
+            Text(missing ? "using default" : (monitor.activeInputName ?? ""))
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .lineLimit(1)
+                .frame(width: 130, alignment: .trailing)
         }
     }
 
