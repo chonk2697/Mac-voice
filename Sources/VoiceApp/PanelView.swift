@@ -32,7 +32,7 @@ struct PanelView: View {
             footer
         }
         .padding(14)
-        .frame(width: 380)
+        .frame(width: 400)
     }
 
     private var header: some View {
@@ -46,7 +46,7 @@ struct PanelView: View {
                 .foregroundStyle(.secondary)
                 .lineLimit(1)
                 .truncationMode(.tail)
-                .frame(width: 150, alignment: .trailing)
+                .frame(width: 130, alignment: .trailing)
             Button {
                 monitor.isPaused ? monitor.resume() : monitor.pause()
             } label: {
@@ -64,8 +64,8 @@ struct PanelView: View {
             }
             .pickerStyle(.segmented)
             .labelsHidden()
-            .frame(width: 170)
-            Spacer()
+            .frame(width: 160)
+            Spacer(minLength: 8)
             HStack(spacing: 6) {
                 if let progress = monitor.baselineProgress {
                     ProgressView(value: progress)
@@ -83,7 +83,7 @@ struct PanelView: View {
                         .disabled(monitor.baseline == nil)
                 }
             }
-            .frame(width: 190, alignment: .trailing)
+            .frame(width: 180, alignment: .trailing)
         }
     }
 
