@@ -1,41 +1,62 @@
 import AVFoundation
-import CoreAudio
+import CoreMedia
 import Foundation
 import os
 
 nonisolated private let log = Logger(subsystem: "com.zoezyla.voice", category: "capture")
 
-/// Captures a microphone and delivers 16 kHz mono float chunks on an audio
-/// thread. The input can be the system default or a specific device by UID;
-/// capture restarts itself when the device configuration changes.
-nonisolated final class AudioCapture: @unchecked Sendable {
+/// Captures one microphone through AVCaptureSession and delivers 16 kHz mono
+/// float chunks on a capture queue.
+///
+/// AVCaptureSession binds to a specific device and keeps that binding while
+/// other apps open and close devices, which AVAudioEngine's input node does
+/// not. The input can be a device by unique ID or the system default; a
+/// chosen device that disappears falls back to the default until it returns.
+nonisolated final class AudioCapture: NSObject, AVCaptureAudioDataOutputSampleBufferDelegate, @unchecked Sendable {
     typealias Handler = @Sendable ([Float]) -> Void
 
     static let sampleRate = 16_000.0
 
+    private let handler: Handler
+    private let lock = NSLock()
+    private let queue = DispatchQueue(label: "com.zoezyla.voice.capture")
+    private let session = AVCaptureSession()
+    private let output = AVCaptureAudioDataOutput()
     private let targetFormat = AVAudioFormat(commonFormat: .pcmFormatFloat32,
                                              sampleRate: AudioCapture.sampleRate,
                                              channels: 1, interleaved: false)!
-    private let handler: Handler
-    private let lock = NSLock()
-    private var engine: AVAudioEngine?
-    private var observer: (any NSObjectProtocol)?
-    private var running = false
+    private var input: AVCaptureDeviceInput?
+    private var activeDevice: AVCaptureDevice?
     private var preferredDeviceUID: String?
-    private var activeDeviceID: AudioDeviceID?
-    /// Serialises reactions to configuration changes so they cannot pile up.
-    private let changeQueue = DispatchQueue(label: "com.zoezyla.voice.capture")
-    private var recentRestarts: [Date] = []
-    /// More restarts than this within `restartWindow` means something is looping.
-    private let maxRestarts = 4
-    private let restartWindow: TimeInterval = 3
+    private var running = false
+    private var converter: AVAudioConverter?
+    private var converterInputFormat: AVAudioFormat?
+    private var observers: [any NSObjectProtocol] = []
 
     init(handler: @escaping Handler) {
         self.handler = handler
+        super.init()
+        output.setSampleBufferDelegate(self, queue: queue)
+
+        let center = NotificationCenter.default
+        observers.append(center.addObserver(forName: AVCaptureDevice.wasDisconnectedNotification, object: nil, queue: nil) { [weak self] note in
+            guard let self, let device = note.object as? AVCaptureDevice else { return }
+            self.deviceChanged(device, connected: false)
+        })
+        observers.append(center.addObserver(forName: AVCaptureDevice.wasConnectedNotification, object: nil, queue: nil) { [weak self] note in
+            guard let self, let device = note.object as? AVCaptureDevice else { return }
+            self.deviceChanged(device, connected: true)
+        })
+        observers.append(center.addObserver(forName: AVCaptureSession.runtimeErrorNotification, object: session, queue: nil) { [weak self] note in
+            guard let self else { return }
+            let error = note.userInfo?[AVCaptureSessionErrorKey] as? NSError
+            log.error("Capture session error: \(error?.localizedDescription ?? "unknown", privacy: .public)")
+            self.queue.async { self.recover() }
+        })
     }
 
     deinit {
-        if let observer { NotificationCenter.default.removeObserver(observer) }
+        for observer in observers { NotificationCenter.default.removeObserver(observer) }
     }
 
     static var authorizationStatus: AVAuthorizationStatus {
@@ -46,202 +67,184 @@ nonisolated final class AudioCapture: @unchecked Sendable {
         await AVCaptureDevice.requestAccess(for: .audio)
     }
 
-    /// Name of the device actually being captured, for display.
+    // MARK: State for the UI
+
+    /// Name of the device being captured.
     var activeDeviceName: String? {
-        lock.withLock { activeDeviceID.flatMap(AudioDevices.name(of:)) }
+        lock.withLock { activeDevice?.localizedName }
     }
 
-    /// False once capture has stopped on its own, for example after looping restarts.
+    /// Same as `activeDeviceName`; kept for the diagnostics log.
+    var liveDeviceName: String? { activeDeviceName }
+
+    /// False once capture has stopped on its own.
     var isRunning: Bool {
-        lock.withLock { running }
-    }
-
-    /// The device the engine's input unit reports right now, read live.
-    var liveDeviceName: String? {
-        lock.withLock { engine.flatMap(AudioCapture.currentDevice(of:)).flatMap(AudioDevices.name(of:)) }
+        lock.withLock { running && session.isRunning }
     }
 
     var isFollowingDefault: Bool {
         lock.withLock { preferredDeviceUID == nil }
     }
 
-    /// True when a preferred device was requested but is not available, so
-    /// the system default is in use instead.
+    /// True when a device was chosen but is not attached, so the default is in use.
     var isUsingFallback: Bool {
-        lock.withLock { preferredDeviceUID != nil && activeDeviceID == AudioDevices.defaultInputDeviceID() && AudioDevices.device(uid: preferredDeviceUID!) == nil }
+        lock.withLock { preferredDeviceUID != nil && activeDevice?.uniqueID != preferredDeviceUID }
     }
 
-    /// Chooses the input by device UID, or nil for the system default.
-    /// Restarts capture if it is running.
+    // MARK: Control
+
+    /// Chooses the input by unique ID, or nil for the system default.
     func setPreferredDevice(uid: String?) {
         lock.withLock {
             preferredDeviceUID = uid
             guard running else { return }
-            tearDown()
-            do {
-                try setUp()
-            } catch {
-                running = false
-                log.error("Restart on device change failed: \(error.localizedDescription, privacy: .public)")
-            }
+            reconfigure(reason: "input changed")
+        }
+    }
+
+    /// Call when the system default input changes; only matters when following it.
+    func systemDefaultChanged() {
+        lock.withLock {
+            guard running, preferredDeviceUID == nil else { return }
+            reconfigure(reason: "system default changed")
         }
     }
 
     func start() throws {
         try lock.withLock {
             guard !running else { return }
-            try setUp()
+            try configure()
+            session.startRunning()
             running = true
+            log.info("Capturing \(self.activeDevice?.localizedName ?? "unknown", privacy: .public)")
         }
     }
 
     func stop() {
         lock.withLock {
             guard running else { return }
-            tearDown()
+            session.stopRunning()
             running = false
         }
     }
 
-    /// AVAudioEngine stops itself when its input configuration changes, which
-    /// also happens once right after we bind it to a non-default device. The
-    /// same engine is restarted with a fresh tap; only if that fails (device
-    /// unplugged) is everything rebuilt, which also resolves the fallback.
-    private func handleConfigurationChange() {
-        lock.withLock {
-            guard running, let engine else { return }
-            let now = Date.now
-            recentRestarts = recentRestarts.filter { now.timeIntervalSince($0) < restartWindow }
-            recentRestarts.append(now)
-            guard recentRestarts.count <= maxRestarts else {
-                log.error("Capture restarted \(self.recentRestarts.count) times in \(Int(self.restartWindow)) s; stopping")
-                tearDown()
-                running = false
-                return
-            }
+    // MARK: Session configuration
 
-            engine.inputNode.removeTap(onBus: 0)
-            engine.stop()
-            if let uid = preferredDeviceUID, let wanted = AudioDevices.device(uid: uid),
-               AudioCapture.currentDevice(of: engine) != wanted.id, let unit = engine.inputNode.audioUnit {
-                var id = wanted.id
-                let status = AudioUnitSetProperty(unit, kAudioOutputUnitProperty_CurrentDevice, kAudioUnitScope_Global, 0,
-                                                  &id, UInt32(MemoryLayout<AudioDeviceID>.size))
-                log.notice("Engine had left \(wanted.name, privacy: .public); re-bound it (status \(status))")
-            }
-            let format = engine.inputNode.inputFormat(forBus: 0)
-            if format.sampleRate > 0, format.channelCount > 0 {
-                do {
-                    try installTap(on: engine, format: format)
-                    try engine.start()
-                    activeDeviceID = AudioCapture.currentDevice(of: engine) ?? activeDeviceID
-                    let name = activeDeviceID.flatMap(AudioDevices.name(of:)) ?? "unknown device"
-                    log.info("Capture resumed on \(name, privacy: .public): \(Int(format.sampleRate)) Hz, \(format.channelCount) ch")
-                    return
-                } catch {
-                    log.notice("Resume failed (\(error.localizedDescription, privacy: .public)); rebuilding capture")
-                }
-            } else {
-                log.notice("Input format is empty after the change; rebuilding capture")
-            }
-            tearDown()
-            do {
-                try setUp()
-            } catch {
-                running = false
-                log.error("Rebuild failed: \(error.localizedDescription, privacy: .public)")
-            }
-        }
-    }
-
-    private static func currentDevice(of engine: AVAudioEngine) -> AudioDeviceID? {
-        guard let unit = engine.inputNode.audioUnit else { return nil }
-        var id: AudioDeviceID = 0
-        var size = UInt32(MemoryLayout<AudioDeviceID>.size)
-        let status = AudioUnitGetProperty(unit, kAudioOutputUnitProperty_CurrentDevice, kAudioUnitScope_Global, 0, &id, &size)
-        return status == noErr && id != 0 ? id : nil
-    }
-
-    private func tearDown() {
-        if let observer { NotificationCenter.default.removeObserver(observer) }
-        observer = nil
-        engine?.inputNode.removeTap(onBus: 0)
-        engine?.stop()
-        engine = nil
-        activeDeviceID = nil
-    }
-
-    /// Builds a fresh engine each time so that the input node picks up the
-    /// chosen device's format cleanly.
-    private func setUp() throws {
-        let engine = AVAudioEngine()
-        let input = engine.inputNode
-
-        var selected: AudioDeviceID? = nil
+    private func resolveDevice() -> AVCaptureDevice? {
         if let uid = preferredDeviceUID {
-            if let device = AudioDevices.device(uid: uid) {
-                selected = device.id
-            } else {
-                log.notice("Preferred input \(uid, privacy: .public) not present; using the system default")
-            }
+            if let device = AVCaptureDevice(uniqueID: uid) { return device }
+            log.notice("Chosen input \(uid, privacy: .public) is not attached; using the system default")
         }
-        if let deviceID = selected, let unit = input.audioUnit {
-            var id = deviceID
-            let status = AudioUnitSetProperty(unit, kAudioOutputUnitProperty_CurrentDevice, kAudioUnitScope_Global, 0,
-                                              &id, UInt32(MemoryLayout<AudioDeviceID>.size))
-            if status != noErr {
-                log.error("Could not select input device (\(status)); using the system default")
-                selected = nil
-            }
-        }
-        activeDeviceID = selected ?? AudioDevices.defaultInputDeviceID()
-
-        let inputFormat = input.inputFormat(forBus: 0)
-        guard inputFormat.sampleRate > 0, inputFormat.channelCount > 0 else {
-            throw CaptureError.noInput
-        }
-        try installTap(on: engine, format: inputFormat)
-
-        observer = NotificationCenter.default.addObserver(
-            forName: .AVAudioEngineConfigurationChange, object: engine, queue: nil
-        ) { [weak self] _ in
-            guard let self else { return }
-            log.info("Audio configuration changed")
-            changeQueue.async { self.handleConfigurationChange() }
-        }
-
-        engine.prepare()
-        try engine.start()
-        self.engine = engine
-        let name = activeDeviceID.flatMap(AudioDevices.name(of:)) ?? "unknown device"
-        log.info("Capturing \(name, privacy: .public): \(Int(inputFormat.sampleRate)) Hz, \(inputFormat.channelCount) ch, converting to 16 kHz mono")
+        return AVCaptureDevice.default(for: .audio)
     }
 
-    private func installTap(on engine: AVAudioEngine, format inputFormat: AVAudioFormat) throws {
-        guard let converter = AVAudioConverter(from: inputFormat, to: targetFormat) else {
-            throw CaptureError.unsupportedFormat
-        }
-        let ratio = targetFormat.sampleRate / inputFormat.sampleRate
-        let target = targetFormat
-        let handler = self.handler
+    /// Swaps the session's input for the resolved device. Works while running.
+    private func configure() throws {
+        guard let device = resolveDevice() else { throw CaptureError.noInput }
+        if device.uniqueID == activeDevice?.uniqueID, input != nil, session.outputs.contains(output) { return }
 
-        engine.inputNode.installTap(onBus: 0, bufferSize: 1024, format: inputFormat) { buffer, _ in
-            let capacity = AVAudioFrameCount(Double(buffer.frameLength) * ratio) + 64
-            guard let output = AVAudioPCMBuffer(pcmFormat: target, frameCapacity: capacity) else { return }
-            var consumed = false
-            var error: NSError?
-            converter.convert(to: output, error: &error) { _, status in
-                if consumed {
-                    status.pointee = .noDataNow
-                    return nil
-                }
-                consumed = true
-                status.pointee = .haveData
-                return buffer
-            }
-            guard error == nil, output.frameLength > 0, let channel = output.floatChannelData else { return }
-            handler(Array(UnsafeBufferPointer(start: channel[0], count: Int(output.frameLength))))
+        session.beginConfiguration()
+        defer { session.commitConfiguration() }
+        if let input {
+            session.removeInput(input)
+            self.input = nil
         }
+        let newInput = try AVCaptureDeviceInput(device: device)
+        guard session.canAddInput(newInput) else { throw CaptureError.noInput }
+        session.addInput(newInput)
+        input = newInput
+        if !session.outputs.contains(output) {
+            guard session.canAddOutput(output) else { throw CaptureError.unsupportedFormat }
+            session.addOutput(output)
+        }
+        activeDevice = device
+        converter = nil
+        converterInputFormat = nil
+    }
+
+    private func reconfigure(reason: String) {
+        do {
+            try configure()
+            log.info("Now capturing \(self.activeDevice?.localizedName ?? "unknown", privacy: .public) (\(reason, privacy: .public))")
+        } catch {
+            log.error("Could not reconfigure capture (\(reason, privacy: .public)): \(error.localizedDescription, privacy: .public)")
+        }
+    }
+
+    private func deviceChanged(_ device: AVCaptureDevice, connected: Bool) {
+        lock.withLock {
+            guard running else { return }
+            if !connected, device.uniqueID == activeDevice?.uniqueID {
+                reconfigure(reason: "\(device.localizedName) disconnected")
+            } else if connected, device.uniqueID == preferredDeviceUID, activeDevice?.uniqueID != preferredDeviceUID {
+                reconfigure(reason: "\(device.localizedName) reconnected")
+            }
+        }
+    }
+
+    private func recover() {
+        lock.withLock {
+            guard running else { return }
+            if !session.isRunning {
+                reconfigure(reason: "recovering from error")
+                session.startRunning()
+            }
+        }
+    }
+
+    // MARK: Sample delivery
+
+    func captureOutput(_ output: AVCaptureOutput, didOutput sampleBuffer: CMSampleBuffer, from connection: AVCaptureConnection) {
+        guard let description = sampleBuffer.formatDescription else { return }
+        let inputFormat = AVAudioFormat(cmAudioFormatDescription: description)
+
+        var sizeNeeded = 0
+        CMSampleBufferGetAudioBufferListWithRetainedBlockBuffer(
+            sampleBuffer, bufferListSizeNeededOut: &sizeNeeded, bufferListOut: nil, bufferListSize: 0,
+            blockBufferAllocator: nil, blockBufferMemoryAllocator: nil, flags: 0, blockBufferOut: nil)
+        guard sizeNeeded > 0 else { return }
+        let raw = UnsafeMutableRawPointer.allocate(byteCount: sizeNeeded, alignment: 16)
+        defer { raw.deallocate() }
+        let list = raw.assumingMemoryBound(to: AudioBufferList.self)
+        var block: CMBlockBuffer?
+        let status = CMSampleBufferGetAudioBufferListWithRetainedBlockBuffer(
+            sampleBuffer, bufferListSizeNeededOut: nil, bufferListOut: list, bufferListSize: sizeNeeded,
+            blockBufferAllocator: kCFAllocatorDefault, blockBufferMemoryAllocator: kCFAllocatorDefault,
+            flags: kCMSampleBufferFlag_AudioBufferList_Assure16ByteAlignment, blockBufferOut: &block)
+        guard status == noErr, let pcm = AVAudioPCMBuffer(pcmFormat: inputFormat, bufferListNoCopy: list) else { return }
+        withExtendedLifetime(block) {
+            if let samples = convert(pcm, from: inputFormat), !samples.isEmpty {
+                handler(samples)
+            }
+        }
+    }
+
+    private func convert(_ buffer: AVAudioPCMBuffer, from inputFormat: AVAudioFormat) -> [Float]? {
+        if inputFormat.sampleRate == targetFormat.sampleRate, inputFormat.channelCount == 1,
+           inputFormat.commonFormat == .pcmFormatFloat32, let channel = buffer.floatChannelData {
+            return Array(UnsafeBufferPointer(start: channel[0], count: Int(buffer.frameLength)))
+        }
+        if converter == nil || converterInputFormat != inputFormat {
+            converter = AVAudioConverter(from: inputFormat, to: targetFormat)
+            converterInputFormat = inputFormat
+        }
+        guard let converter else { return nil }
+        let ratio = targetFormat.sampleRate / inputFormat.sampleRate
+        let capacity = AVAudioFrameCount(Double(buffer.frameLength) * ratio) + 64
+        guard let out = AVAudioPCMBuffer(pcmFormat: targetFormat, frameCapacity: capacity) else { return nil }
+        var consumed = false
+        var error: NSError?
+        converter.convert(to: out, error: &error) { _, status in
+            if consumed {
+                status.pointee = .noDataNow
+                return nil
+            }
+            consumed = true
+            status.pointee = .haveData
+            return buffer
+        }
+        guard error == nil, let channel = out.floatChannelData else { return nil }
+        return Array(UnsafeBufferPointer(start: channel[0], count: Int(out.frameLength)))
     }
 
     enum CaptureError: Error, LocalizedError {
@@ -250,7 +253,7 @@ nonisolated final class AudioCapture: @unchecked Sendable {
         var errorDescription: String? {
             switch self {
             case .noInput: "No microphone input is available."
-            case .unsupportedFormat: "The microphone format cannot be converted."
+            case .unsupportedFormat: "The microphone format cannot be used."
             }
         }
     }

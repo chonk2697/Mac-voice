@@ -330,8 +330,19 @@ func synth() throws {
     print("wrote \(arguments[1]): \(vowelName) at \(synth.f0) Hz, tilt \(synth.sourceTiltDbPerOctave) dB/oct")
 }
 
+/// Lists microphones as AVCaptureDevice sees them, with the identifiers the app saves.
+func devices() {
+    let discovery = AVCaptureDevice.DiscoverySession(deviceTypes: [.microphone, .external], mediaType: .audio, position: .unspecified)
+    let defaultID = AVCaptureDevice.default(for: .audio)?.uniqueID
+    for device in discovery.devices {
+        let mark = device.uniqueID == defaultID ? " (system default)" : ""
+        print("\(device.localizedName)\(mark)\n    id: \(device.uniqueID)\n    model: \(device.modelID)")
+    }
+}
+
 do {
     switch arguments.first {
+    case "devices": devices()
     case "analyze": try analyze()
     case "record": try record()
     case "candidates": try candidates()

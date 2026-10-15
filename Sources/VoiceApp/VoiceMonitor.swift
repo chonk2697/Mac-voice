@@ -85,12 +85,9 @@ final class VoiceMonitor {
     private func devicesChanged() {
         inputDevices = AudioDevices.inputDevices()
         let names = inputDevices.map(\.name).joined(separator: ", ")
-        log.info("Input devices: \(names, privacy: .public)")
-        // The engine restarts itself on configuration changes; just refresh the label.
-        Task { @MainActor in
-            try? await Task.sleep(for: .milliseconds(500))
-            self.activeInputName = self.capture?.activeDeviceName
-        }
+        log.info("Input devices: \(names, privacy: .public); default: \(AudioDevices.defaultInputName() ?? "none", privacy: .public)")
+        capture?.systemDefaultChanged()
+        activeInputName = capture?.activeDeviceName
     }
 
     /// Selects an input by device UID, or nil for the system default.
