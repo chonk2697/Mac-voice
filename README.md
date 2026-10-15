@@ -15,7 +15,7 @@ summary numbers of your baseline.
 | Indicator | What is measured | How |
 |---|---|---|
 | Pitch | Fundamental frequency in Hz, with the note name | YIN (de Cheveigné & Kawahara 2002) on 16 kHz audio |
-| Formants | F1, F2, F3 in Hz | Burg LPC at a 5.3 kHz ceiling, Praat's recipe |
+| Formants | F1, F2, F3 in Hz | Burg LPC at a 5.5 kHz ceiling, Praat's recipe, tracked across frames by fixed-lag Viterbi decoding (100 ms lookahead) |
 | Resonance | Vocal tract size, 0 dark to 100 bright, plus formant shift against your baseline | Vocal tract length from formant spacing (Anikin, Barreda & Reby 2023) |
 | Weight | Vocal fold mass, 0 light to 100 heavy | H1*-H2*: first minus second harmonic level, corrected for F1 and F2 (Iseli & Alwan 2004) |
 | Brightness | Experimental. Upper-band energy in dB and its change against your baseline | Alpha ratio: 1 to 5 kHz level minus 50 Hz to 1 kHz level |
@@ -43,12 +43,18 @@ scripts/run.sh          # build build/Voice.app and launch it
 first launch asks for microphone access. The package also opens directly in
 Xcode (`open Package.swift`).
 
-The same analysis runs from the command line over audio files:
+The same analysis runs from the command line over audio files, and the CLI
+can record a clip or synthesize a test vowel:
 
 ```bash
-swift run voice-cli analyze recording.wav
+swift run voice-cli analyze recording.wav            # medians and per-second table
+swift run voice-cli analyze recording.wav --frames   # one JSON object per 20 ms hop
+swift run voice-cli record recordings/speech.wav --seconds 20
 swift run voice-cli synth vowel.wav --f0 180 --vowel feminineAh --tilt 12
+swift run voice-cli candidates recording.wav         # raw LPC poles per frame, for tuning
 ```
+
+`recordings/` is git-ignored; nothing recorded is ever committed.
 
 ## Layout
 
@@ -63,5 +69,7 @@ swift run voice-cli synth vowel.wav --f0 180 --vowel feminineAh --tilt 12
 
 ## Status
 
-MVP. The measurements are validated against synthesized vowels; real-voice
-calibration of the gauge anchors and target bands is the next step.
+MVP. Pitch, weight and brightness are validated against synthesized vowels;
+formants are additionally validated against Praat on real speech (see
+`docs/decisions.md`, item 11, and `Tests/Fixtures`). Real-voice calibration
+of the gauge anchors and target bands is the next step.

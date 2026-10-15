@@ -13,15 +13,21 @@ public enum Window {
                     count: count, isHalfWindow: false)
     }
 
-    /// Gaussian window, close to the one Praat uses for LPC analysis.
-    public static func gaussian(_ count: Int) -> [Float] {
+    /// Gaussian window with standard deviation `sigmaFraction` of the length.
+    /// Praat's LPC window is a Gaussian with `sigmaFraction` 1 / sqrt(24)
+    /// (its `exp(-12 x^2)` shape over -0.5...0.5), tails trimmed to zero.
+    public static func gaussian(_ count: Int, sigmaFraction: Double = 1.0 / 6) -> [Float] {
         let mid = Double(count - 1) / 2
-        let sigma = Double(count) / 6
+        let sigma = Double(count) * sigmaFraction
+        let edge = exp(-0.5 * (mid / sigma) * (mid / sigma))
         return (0..<count).map { i in
             let d = (Double(i) - mid) / sigma
-            return Float(exp(-0.5 * d * d))
+            return Float((exp(-0.5 * d * d) - edge) / (1 - edge))
         }
     }
+
+    /// Praat's window shape: the Gaussian above with `sigmaFraction` 1 / sqrt(24).
+    public static let praatSigmaFraction = 1.0 / 24.0.squareRoot()
 }
 
 /// Small signal helpers.

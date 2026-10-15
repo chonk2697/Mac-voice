@@ -43,6 +43,13 @@ public struct VowelSynthesizer: Sendable {
 
     /// Renders `duration` seconds of a steady vowel.
     public func render(duration: Double) -> [Float] {
+        render(duration: duration) { _ in formants }
+    }
+
+    /// Renders `duration` seconds of a vowel whose formants move: `formantsAt`
+    /// gives the formant set at a time in seconds (always the same count),
+    /// and the resonators are retuned every millisecond.
+    public func render(duration: Double, formantsAt: (Double) -> [Formant]) -> [Float] {
         let count = Int(duration * sampleRate)
         guard count > 0 else { return [] }
 
@@ -58,25 +65,46 @@ public struct VowelSynthesizer: Sendable {
             }
         }
 
-        // Resonator cascade.
+        // Resonator cascade, coefficients refreshed per block.
+        let block = max(1, Int(sampleRate / 1000))
+        let resonators = formantsAt(0).count
         var y = source
-        for formant in formants {
-            let r = exp(-Double.pi * formant.bandwidth / sampleRate)
-            let theta = 2 * Double.pi * formant.frequency / sampleRate
-            let a1 = -2 * r * cos(theta)
-            let a2 = r * r
-            let b0 = 1 + a1 + a2
-            var y1 = 0.0, y2 = 0.0
-            for n in 0..<count {
-                let out = b0 * y[n] - a1 * y1 - a2 * y2
-                y2 = y1
-                y1 = out
-                y[n] = out
+        var y1 = [Double](repeating: 0, count: resonators)
+        var y2 = [Double](repeating: 0, count: resonators)
+        var start = 0
+        while start < count {
+            let end = min(start + block, count)
+            let current = formantsAt(Double(start) / sampleRate)
+            precondition(current.count == resonators, "formant count must not change")
+            for (i, formant) in current.enumerated() {
+                let r = exp(-Double.pi * formant.bandwidth / sampleRate)
+                let theta = 2 * Double.pi * formant.frequency / sampleRate
+                let a1 = -2 * r * cos(theta)
+                let a2 = r * r
+                let b0 = 1 + a1 + a2
+                for n in start..<end {
+                    let out = b0 * y[n] - a1 * y1[i] - a2 * y2[i]
+                    y2[i] = y1[i]
+                    y1[i] = out
+                    y[n] = out
+                }
             }
+            start = end
         }
 
         let peak = y.map(abs).max() ?? 1
         let scale = peak > 0 ? Double(amplitude) / peak : 1
         return y.map { Float($0 * scale) }
+    }
+
+    /// Formants interpolated between two sets on a log-frequency scale,
+    /// `t` from 0 (`from`) to 1 (`to`).
+    public static func interpolate(_ from: [Formant], _ to: [Formant], _ t: Double) -> [Formant] {
+        precondition(from.count == to.count)
+        let t = max(0, min(1, t))
+        return zip(from, to).map { a, b in
+            Formant(exp(log(a.frequency) + t * (log(b.frequency) - log(a.frequency))),
+                    bandwidth: a.bandwidth + t * (b.bandwidth - a.bandwidth))
+        }
     }
 }

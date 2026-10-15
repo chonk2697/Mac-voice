@@ -95,30 +95,41 @@ public struct AnalyzerConfiguration: Sendable, Equatable {
     /// clicks, breaths and other non-speech sounds rather than vowels.
     public var maxF1 = 1200.0
     public var maxF2 = 3600.0
+    /// Frames the formant tracker looks ahead before deciding a frame; voiced
+    /// frames are delayed by this many hops (100 ms at the defaults).
+    public var formantLookahead = 5
 
     public init() {}
 }
 
 /// Turns a continuous mono sample stream into `VoiceFrame`s, one per hop.
 ///
-/// Not thread-safe; the app owns one instance inside an actor.
+/// Voiced frames come out `formantLookahead` hops late, once the formant
+/// tracker has seen what follows them; unvoiced frames come out at once,
+/// after any voiced frames still pending. Not thread-safe; the app owns one
+/// instance inside an actor.
 public final class VoiceAnalyzer {
     public let configuration: AnalyzerConfiguration
     private let pitchDetector: YINPitchDetector
     private let formantEstimator: FormantEstimator
+    private var formantTracker: FormantTracker
     private let spectrumAnalyzer: SpectrumAnalyzer
     private var ring: RingBuffer
     private var highPass: HighPassFilter?
     private var samplesSinceHop = 0
     private var samplesSeen = 0
     private let levelWindow: Int
+    /// Voiced frames waiting for the tracker to decide their formants.
+    private var pending: [(frame: VoiceFrame, spectrum: Spectrum)] = []
 
     public init(configuration: AnalyzerConfiguration = AnalyzerConfiguration()) {
         self.configuration = configuration
         let rate = configuration.sampleRate
         pitchDetector = YINPitchDetector(sampleRate: rate, minFrequency: configuration.minPitch,
                                          maxFrequency: configuration.maxPitch)
-        formantEstimator = FormantEstimator(sampleRate: rate)
+        // The tracker judges bandwidth itself, so it sees wide poles too.
+        formantEstimator = FormantEstimator(sampleRate: rate, maxBandwidth: 1500)
+        formantTracker = FormantTracker(lookahead: configuration.formantLookahead)
         spectrumAnalyzer = SpectrumAnalyzer(sampleRate: rate)
         levelWindow = Int(0.032 * rate)
         if configuration.highPassHz > 0 {
@@ -127,6 +138,15 @@ public final class VoiceAnalyzer {
         let needed = max(pitchDetector.requiredSamples, formantEstimator.requiredSamples,
                          spectrumAnalyzer.requiredSamples, levelWindow)
         ring = RingBuffer(capacity: needed * 2)
+    }
+
+    /// Seconds between a frame's `time` and the centre of its formant window.
+    public var formantWindowDelay: Double { formantEstimator.windowCentreDelay }
+
+    /// Decides and returns the voiced frames still held back by the tracker's
+    /// lookahead, for the end of a file or a pause in capture.
+    public func flush() -> [VoiceFrame] {
+        finish(formantTracker.flush())
     }
 
     /// Appends samples and returns a frame for every hop boundary crossed.
@@ -142,13 +162,13 @@ public final class VoiceAnalyzer {
             samplesSeen += take
             if samplesSinceHop >= configuration.hop {
                 samplesSinceHop = 0
-                frames.append(analyzeCurrentFrame())
+                frames += analyzeCurrentFrame()
             }
         }
         return frames
     }
 
-    private func analyzeCurrentFrame() -> VoiceFrame {
+    private func analyzeCurrentFrame() -> [VoiceFrame] {
         let time = Double(samplesSeen) / configuration.sampleRate
         let level = Double(Signal.decibels(Signal.rms(ring.latest(levelWindow))))
         var frame = VoiceFrame(time: time, level: level)
@@ -159,27 +179,48 @@ public final class VoiceAnalyzer {
                                                    to: configuration.speechBand.upperBound),
               speechLevel >= configuration.speechBandGateDb,
               let pitch = pitchDetector.estimate(ring.latest(pitchDetector.requiredSamples)) else {
-            return frame
+            // A voicing break: whatever is pending gets decided on what it has.
+            return finish(formantTracker.flush()) + [frame]
         }
         frame.isVoiced = true
         frame.pitch = pitch.frequency
         frame.clarity = pitch.clarity
-
-        var formants = formantEstimator.estimate(ring.latest(formantEstimator.requiredSamples))
-        if let f1 = formants.first?.frequency, f1 > configuration.maxF1 { formants = [] }
-        if formants.count > 1, formants[1].frequency > configuration.maxF2 { formants = [] }
-        frame.formants = formants
-        if formants.count >= 2,
-           let length = VocalTract.length(formants: formants.map(\.frequency)),
-           configuration.vocalTractLengthRange.contains(length) {
-            frame.vocalTractLength = length
-        }
-        frame.h1h2 = formants.isEmpty
-            ? HarmonicMeasures.h1h2(spectrum: spectrum, f0: pitch.frequency)
-            : HarmonicMeasures.correctedH1H2(spectrum: spectrum, f0: pitch.frequency, formants: formants)
         frame.centroid = spectrum.centroid(from: configuration.centroidBand.lowerBound,
                                            to: configuration.centroidBand.upperBound)
         frame.alphaRatio = spectrum.alphaRatio()
-        return frame
+
+        let candidates = formantEstimator.candidates(ring.latest(formantEstimator.requiredSamples))
+        pending.append((frame, spectrum))
+        return finish(formantTracker.push(candidates))
+    }
+
+    /// Applies the tracker's decisions to the oldest pending frames, in order.
+    private func finish(_ decisions: [[Formant?]]) -> [VoiceFrame] {
+        var frames: [VoiceFrame] = []
+        for slots in decisions {
+            guard !pending.isEmpty else { break }
+            var (frame, spectrum) = pending.removeFirst()
+            // Keep the filled prefix, so that index i is always F(i + 1).
+            var formants: [Formant] = []
+            for slot in slots {
+                guard let formant = slot else { break }
+                formants.append(formant)
+            }
+            if let f1 = formants.first?.frequency, f1 > configuration.maxF1 { formants = [] }
+            if formants.count > 1, formants[1].frequency > configuration.maxF2 { formants = [] }
+            frame.formants = formants
+            if formants.count >= 2,
+               let length = VocalTract.length(formants: formants.map(\.frequency)),
+               configuration.vocalTractLengthRange.contains(length) {
+                frame.vocalTractLength = length
+            }
+            if let f0 = frame.pitch {
+                frame.h1h2 = formants.isEmpty
+                    ? HarmonicMeasures.h1h2(spectrum: spectrum, f0: f0)
+                    : HarmonicMeasures.correctedH1H2(spectrum: spectrum, f0: f0, formants: formants)
+            }
+            frames.append(frame)
+        }
+        return frames
     }
 }

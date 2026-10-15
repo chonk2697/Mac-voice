@@ -29,3 +29,6 @@ build/
 *.mobileprovision
 *.provisionprofile
 .env
+
+# Local voice recordings (never committed)
+recordings/

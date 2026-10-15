@@ -18,25 +18,31 @@ public struct Formant: Sendable, Equatable {
 /// pre-emphasise, apply a Gaussian window, fit Burg LPC, then read candidate
 /// formants off the angles of the prediction polynomial's roots.
 ///
-/// Candidates are assigned to F1, F2, F3 by a plausibility search rather than
-/// by taking the three lowest: each slot has a typical frequency range, wide
-/// poles are penalised, and lower candidates are mildly preferred. This copes
-/// with breathy voices, whose F1 fits come out wide, and with source poles
-/// below F1. Frame-to-frame continuity is left to the caller.
+/// `candidates` is the raw list for `FormantTracker`, which adds continuity
+/// across frames. `estimate` assigns one frame's candidates to F1, F2, F3 by
+/// a plausibility search instead: each slot has a typical frequency range,
+/// wide poles are penalised, and lower candidates are mildly preferred.
+///
+/// The defaults match Praat's "To Formant (burg)" for a female-range voice
+/// (ceiling 5.5 kHz, five formants, pre-emphasis from 50 Hz); measured on
+/// connected speech against Praat, a 40 ms Gaussian window at a 20 ms hop
+/// offers a candidate within 10 % of Praat's F1, F2 and F3 in 96 to 98 % of
+/// voiced frames. A second pre-emphasis pass at the input rate, tried
+/// earlier for breathy voices, cost most of F1 and is off.
 public struct FormantEstimator: Sendable {
     /// Sample rate of the audio handed to `estimate`.
     public let sampleRate: Double
-    /// Sample rate the LPC runs at, 2/3 of the input by default so that the
-    /// analysis ceiling is about 5.3 kHz, close to Praat's 5.5 kHz.
+    /// Sample rate the LPC runs at, 11/16 of the input by default so that the
+    /// analysis ceiling is Praat's 5.5 kHz.
     public let analysisSampleRate: Double
     /// LPC order at the analysis rate.
     public let order: Int
     /// Analysis window length in samples at the analysis rate.
     public let windowLength: Int
     /// Apply a first-order pre-emphasis at the input rate before resampling,
-    /// in addition to the one at the analysis rate that Praat uses. The extra
-    /// pass flattens a breathy source enough for the LPC fit to find F1, and
-    /// placing it before the resampler keeps the bandwidth estimates sane.
+    /// in addition to the one at the analysis rate that Praat uses. Off by
+    /// default: the extra 6 dB per octave pushes the LPC poles up and loses
+    /// F1 on ordinary speech.
     public let preEmphasisBeforeResampling: Bool
     /// Roots below this frequency are never formant candidates.
     public let minFormantFrequency: Double
@@ -47,19 +53,22 @@ public struct FormantEstimator: Sendable {
     /// Typical frequency range per slot. Candidates outside pay a cost that
     /// grows with the log distance from the nearest edge.
     public let plausibleRanges: [ClosedRange<Double>]
+    /// Standard deviation of the Gaussian window as a fraction of its length.
+    public let windowSigmaFraction: Double
 
     private let resampler: Resampler?
     private let window: [Float]
 
     public init(sampleRate: Double,
                 order: Int = 10,
-                windowDuration: Double = 0.030,
-                resampleUp: Int = 2, resampleDown: Int = 3,
-                preEmphasisBeforeResampling: Bool = true,
+                windowDuration: Double = 0.040,
+                resampleUp: Int = 11, resampleDown: Int = 16,
+                preEmphasisBeforeResampling: Bool = false,
                 minFormantFrequency: Double = 90,
                 maxBandwidth: Double = 500,
                 maxFormants: Int = 3,
-                plausibleRanges: [ClosedRange<Double>] = [150...1100, 500...3200, 1700...4000]) {
+                plausibleRanges: [ClosedRange<Double>] = [150...1100, 500...3200, 1700...4000],
+                windowSigmaFraction: Double = 1.0 / 6) {
         self.sampleRate = sampleRate
         if resampleUp == resampleDown {
             self.resampler = nil
@@ -75,12 +84,23 @@ public struct FormantEstimator: Sendable {
         self.maxBandwidth = maxBandwidth
         self.maxFormants = maxFormants
         self.plausibleRanges = plausibleRanges
-        self.window = Window.gaussian(windowLength)
+        self.windowSigmaFraction = windowSigmaFraction
+        self.window = Window.gaussian(windowLength, sigmaFraction: windowSigmaFraction)
     }
 
     /// Number of input samples `estimate` needs.
     public var requiredSamples: Int {
         resampler?.inputCount(forOutputs: windowLength) ?? windowLength
+    }
+
+    /// Seconds between the last input sample and the centre of the analysis
+    /// window: half the window plus the resampler's group delay.
+    public var windowCentreDelay: Double {
+        var delay = Double(windowLength) / 2 / analysisSampleRate
+        if let resampler {
+            delay += Double(resampler.taps.count - 1) / 2 / (sampleRate * Double(resampler.up))
+        }
+        return delay
     }
 
     /// Estimates the formants of the most recent samples of `x`.

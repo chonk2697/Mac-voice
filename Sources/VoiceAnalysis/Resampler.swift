@@ -12,12 +12,16 @@ public struct Resampler: Sendable {
     /// - Parameters:
     ///   - up: interpolation factor L.
     ///   - down: decimation factor M.
-    ///   - tapCount: filter length at the upsampled rate (odd keeps it symmetric).
+    ///   - tapCount: filter length at the upsampled rate (odd keeps it
+    ///     symmetric). The default, `96 * up - 1`, keeps the filter's length
+    ///     in seconds, and so its transition band, the same for any factor.
     ///   - beta: Kaiser window shape; 8 gives roughly 80 dB of stopband attenuation.
     ///   - cutoff: low-pass cutoff as a fraction of the upsampled Nyquist frequency.
-    public init(up: Int, down: Int, tapCount: Int = 191, beta: Double = 8,
+    public init(up: Int, down: Int, tapCount: Int? = nil, beta: Double = 8,
                 cutoff: Double? = nil) {
-        precondition(up > 0 && down > 0 && tapCount > 2)
+        precondition(up > 0 && down > 0)
+        let tapCount = tapCount ?? (96 * up - 1)
+        precondition(tapCount > 2)
         self.up = up
         self.down = down
         let fc = (cutoff ?? 0.94 / Double(max(up, down))) * 0.5   // cycles per upsampled sample
