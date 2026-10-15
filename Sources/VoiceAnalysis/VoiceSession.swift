@@ -11,6 +11,15 @@ public enum Metric: String, CaseIterable, Sendable, Codable, Hashable {
         case .h1h2, .alphaRatio: "dB"
         }
     }
+
+    /// Metrics that only mean something averaged over several seconds of
+    /// varied speech, because a single frame mostly reflects the vowel.
+    public var isSlow: Bool {
+        switch self {
+        case .vocalTractLength, .alphaRatio, .centroid: true
+        default: false
+        }
+    }
 }
 
 /// A user-facing indicator, each built from one or more metrics.
@@ -124,10 +133,17 @@ public final class VoiceSession {
     /// Time of the last voiced frame.
     public private(set) var lastVoicedTime: TimeInterval?
 
+    /// Smoothing window for the slow metrics, in seconds.
+    public let slowWindow: TimeInterval
+
     public init(smoothingWindow: TimeInterval = 0.15, hold: TimeInterval = 0.3,
+                slowWindow: TimeInterval = 3, slowHold: TimeInterval = 2,
                 timelineResolution: TimeInterval = 0.1, timelineCapacity: TimeInterval = 600) {
+        self.slowWindow = slowWindow
         for metric in Metric.allCases {
-            smoothers[metric] = TimedMedian(window: smoothingWindow, hold: hold)
+            smoothers[metric] = metric.isSlow
+                ? TimedMedian(window: slowWindow, hold: slowHold)
+                : TimedMedian(window: smoothingWindow, hold: hold)
             timelines[metric] = Timeline(resolution: timelineResolution, capacity: timelineCapacity)
         }
     }
@@ -140,12 +156,15 @@ public final class VoiceSession {
         let values = frame.metricValues
         for metric in Metric.allCases {
             let value = values[metric]
-            if let smoothed = smoothers[metric]!.push(value, at: frame.time) {
+            let smoothed = smoothers[metric]!.push(value, at: frame.time)
+            if let smoothed {
                 current[metric] = smoothed
             } else {
                 current.removeValue(forKey: metric)
             }
-            timelines[metric]!.append(value, at: frame.time)
+            // Slow metrics chart their smoothed value; a raw trace would just
+            // show the vowels going by.
+            timelines[metric]!.append(metric.isSlow ? smoothed : value, at: frame.time)
         }
         if var accumulator = recording {
             accumulator.add(frame)

@@ -61,6 +61,45 @@ struct FormantTests {
         }
     }
 
+    @Test("finds the formants of a breathy vowel", arguments: [105.0, 160.0])
+    func breathyVowel(f0: Double) throws {
+        // Wide F1 and a steep source slope, the case that defeats a hard
+        // bandwidth cutoff.
+        let formants = [VowelSynthesizer.Formant(650, bandwidth: 220),
+                        VowelSynthesizer.Formant(1500, bandwidth: 120),
+                        VowelSynthesizer.Formant(2500, bandwidth: 200),
+                        VowelSynthesizer.Formant(3500, bandwidth: 250)]
+        let synth = VowelSynthesizer(sampleRate: sampleRate, f0: f0, formants: formants, sourceTiltDbPerOctave: 18)
+        let found = FormantEstimator(sampleRate: sampleRate).estimate(synth.render(duration: 0.1))
+        let summary = found.map { String(format: "%.0f/%.0f", $0.frequency, $0.bandwidth) }
+        #expect(found.count == 3, "found \(summary)")
+        for (index, (f, e)) in zip(found, formants).enumerated() {
+            // A breathy F1 reads high by 10 to 15 %, a known bias of LPC on a
+            // steep source; F2 and F3 are tight.
+            let tolerance = index == 0 ? 0.18 : 0.08
+            #expect(abs(f.frequency - e.frequency) < tolerance * e.frequency, "expected \(e.frequency), found \(summary)")
+        }
+    }
+
+    @Test("slot assignment prefers plausible, narrow, low candidates")
+    func slotAssignment() {
+        let ranges: [ClosedRange<Double>] = [150...1100, 500...3200, 1700...4000]
+        // A wide spurious pole below F1 must not displace the real set.
+        let spurious = [Formant(frequency: 342, bandwidth: 361), Formant(frequency: 804, bandwidth: 114),
+                        Formant(frequency: 1119, bandwidth: 168), Formant(frequency: 2440, bandwidth: 200)]
+        #expect(FormantEstimator.select(from: spurious, ranges: ranges, count: 3).map(\.frequency) == [804, 1119, 2440])
+        // A wide pole between F1 and F2 must be skipped.
+        let between = [Formant(frequency: 236, bandwidth: 47), Formant(frequency: 591, bandwidth: 453),
+                       Formant(frequency: 2857, bandwidth: 145), Formant(frequency: 3300, bandwidth: 150)]
+        #expect(FormantEstimator.select(from: between, ranges: ranges, count: 3).map(\.frequency) == [236, 2857, 3300])
+        // A source pole far below F1 is dropped rather than reported.
+        let source = [Formant(frequency: 103, bandwidth: 120), Formant(frequency: 1622, bandwidth: 375)]
+        #expect(FormantEstimator.select(from: source, ranges: ranges, count: 3).map(\.frequency) == [])
+        // Too few candidates still yield the plausible prefix.
+        let two = [Formant(frequency: 500, bandwidth: 90), Formant(frequency: 1500, bandwidth: 100)]
+        #expect(FormantEstimator.select(from: two, ranges: ranges, count: 3).map(\.frequency) == [500, 1500])
+    }
+
     @Test("resampler preserves a tone below the new Nyquist frequency")
     func resamplerTone() throws {
         let resampler = Resampler(up: 2, down: 3)

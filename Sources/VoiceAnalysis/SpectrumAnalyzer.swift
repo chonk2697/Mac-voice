@@ -44,10 +44,11 @@ public struct Spectrum: Sendable {
         return weighted / total
     }
 
-    /// Power in dB between `lowHz` and `highHz`.
+    /// Power in dB of the bins from `lowHz` up to but excluding `highHz`, so
+    /// adjacent bands never share a bin.
     public func bandLevel(from lowHz: Double, to highHz: Double) -> Double? {
-        let low = max(0, Int(lowHz / binWidth))
-        let high = min(magnitudes.count - 1, Int(highHz / binWidth))
+        let low = max(0, Int((lowHz / binWidth).rounded(.up)))
+        let high = min(magnitudes.count - 1, Int((highHz / binWidth).rounded(.up)) - 1)
         guard low < high else { return nil }
         var total = 0.0
         for k in low...high { total += Double(magnitudes[k]) * Double(magnitudes[k]) }

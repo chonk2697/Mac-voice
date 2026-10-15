@@ -206,8 +206,8 @@ struct IndicatorRow: View {
             }
             return "F1 · F2 · F3, median of voiced speech"
         case .resonance:
-            guard let vtl = monitor.current[.vocalTractLength] else { return "Dark 0 to bright 100" }
-            var text = String(format: "Tract %.1f cm · dark 0 to bright 100", vtl)
+            guard let vtl = monitor.current[.vocalTractLength] else { return "Dark 0 to bright 100 · 3 s median" }
+            var text = String(format: "Tract %.1f cm · 3 s median", vtl)
             if let shift = monitor.formantShift {
                 text += String(format: " · formants %+.0f %%", shift * 100)
             }
@@ -217,9 +217,9 @@ struct IndicatorRow: View {
             return String(format: "H1-H2 %.1f dB · light 0 to heavy 100", h1h2)
         case .brightness:
             if let trend = monitor.brightnessTrend {
-                return String(format: "%+.1f dB vs baseline · experimental", trend)
+                return String(format: "%+.1f dB vs baseline · 3 s median", trend)
             }
-            return "Alpha ratio, higher is brighter · experimental"
+            return "Alpha ratio · 3 s median · experimental"
         }
     }
 

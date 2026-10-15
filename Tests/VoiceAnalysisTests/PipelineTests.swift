@@ -82,13 +82,29 @@ struct TimelineTests {
 
 @Suite("Session")
 struct SessionTests {
-    private func frame(at time: TimeInterval, pitch: Double?, f1: Double = 700) -> VoiceFrame {
+    private func frame(at time: TimeInterval, pitch: Double?, f1: Double = 700, vtl: Double = 16) -> VoiceFrame {
         guard let pitch else { return VoiceFrame(time: time, level: -70) }
         let formants = [Formant(frequency: f1, bandwidth: 80),
                         Formant(frequency: 2 * f1, bandwidth: 100),
                         Formant(frequency: 3.5 * f1, bandwidth: 150)]
         return VoiceFrame(time: time, level: -20, isVoiced: true, pitch: pitch, clarity: 0.9,
-                          formants: formants, vocalTractLength: 16, h1h2: 5, centroid: 1500, alphaRatio: -15)
+                          formants: formants, vocalTractLength: vtl, h1h2: 5, centroid: 1500, alphaRatio: -15)
+    }
+
+    @Test("resonance follows a three second median, pitch a fast one")
+    func slowMetrics() {
+        let session = VoiceSession()
+        for i in 0..<100 { session.ingest(frame(at: Double(i) * 0.02, pitch: 150, vtl: 18)) }   // 2 s
+        for i in 100..<150 { session.ingest(frame(at: Double(i) * 0.02, pitch: 200, vtl: 12)) } // 1 s
+        #expect(session.current[.pitch] == 200)
+        #expect(session.current[.vocalTractLength] == 18)   // 2 s of 18 outweigh 1 s of 12
+        for i in 150..<260 { session.ingest(frame(at: Double(i) * 0.02, pitch: 200, vtl: 12)) }
+        #expect(session.current[.vocalTractLength] == 12)
+        for i in 260..<330 { session.ingest(frame(at: Double(i) * 0.02, pitch: nil)) }           // 1.4 s silence
+        #expect(session.current[.pitch] == nil)
+        #expect(session.current[.vocalTractLength] == 12)   // held for 2 s
+        for i in 330..<380 { session.ingest(frame(at: Double(i) * 0.02, pitch: nil)) }
+        #expect(session.current[.vocalTractLength] == nil)
     }
 
     @Test("current values follow the smoother and drop out in silence")
