@@ -45,6 +45,8 @@ struct PanelView: View {
                 .font(.caption)
                 .foregroundStyle(.secondary)
                 .lineLimit(1)
+                .truncationMode(.tail)
+                .frame(width: 150, alignment: .trailing)
             Button(monitor.isPaused ? "Resume" : "Pause") {
                 monitor.isPaused ? monitor.resume() : monitor.pause()
             }
@@ -128,16 +130,25 @@ struct IndicatorRow: View {
                 statusDot
                 Spacer()
                 Text(valueText)
-                    .font(.system(.body, design: .rounded).monospacedDigit().weight(.medium))
+                    .font(.system(.body, design: .monospaced).weight(.medium))
                     .foregroundStyle(monitor.isVoiced ? .primary : .secondary)
+                    .lineLimit(1)
+                    .frame(width: 170, alignment: .trailing)
             }
             if let gauge = monitor.gauge(for: indicator) {
                 GaugeBar(value: gauge, target: monitor.targetRange(for: indicator))
             }
-            HStack {
-                Text(detailText).font(.caption).foregroundStyle(.secondary)
-                Spacer()
-                Text(driftText).font(.caption).foregroundStyle(.secondary)
+            HStack(spacing: 8) {
+                Text(detailText)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                Text(driftText)
+                    .font(.caption.monospacedDigit())
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+                    .frame(width: 150, alignment: .trailing)
             }
             TimelineChart(indicator: indicator, monitor: monitor)
                 .frame(height: indicator == .formants ? 70 : 50)
@@ -161,20 +172,21 @@ struct IndicatorRow: View {
         switch indicator {
         case .pitch:
             guard let pitch = current[.pitch] else { return "–" }
-            return "\(Int(pitch.rounded())) Hz  \(NoteName.name(forFrequency: pitch))"
+            let note = NoteName.name(forFrequency: pitch)
+            return String(format: "%3d Hz  ", Int(pitch.rounded())) + note.padding(toLength: 3, withPad: " ", startingAt: 0)
         case .formants:
             let values = [Metric.f1, .f2, .f3].compactMap { current[$0] }
             guard values.count == 3 else { return "–" }
-            return values.map { "\(Int($0.rounded()))" }.joined(separator: " · ") + " Hz"
+            return values.map { String(format: "%4d", Int($0.rounded())) }.joined(separator: " ") + " Hz"
         case .resonance:
             guard let gauge = monitor.gauge(for: .resonance) else { return "–" }
-            return "\(Int(gauge.rounded()))"
+            return String(format: "%3d", Int(gauge.rounded()))
         case .weight:
             guard let gauge = monitor.gauge(for: .weight) else { return "–" }
-            return "\(Int(gauge.rounded()))"
+            return String(format: "%3d", Int(gauge.rounded()))
         case .brightness:
             guard let alpha = current[.alphaRatio] else { return "–" }
-            return String(format: "%.1f dB", alpha)
+            return String(format: "%5.1f dB", alpha)
         }
     }
 
