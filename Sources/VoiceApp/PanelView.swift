@@ -47,8 +47,10 @@ struct PanelView: View {
                 .lineLimit(1)
                 .truncationMode(.tail)
                 .frame(width: 150, alignment: .trailing)
-            Button(monitor.isPaused ? "Resume" : "Pause") {
+            Button {
                 monitor.isPaused ? monitor.resume() : monitor.pause()
+            } label: {
+                Text(monitor.isPaused ? "Resume" : "Pause").frame(width: 50)
             }
             .controlSize(.small)
         }
@@ -64,22 +66,24 @@ struct PanelView: View {
             .labelsHidden()
             .frame(width: 170)
             Spacer()
-            if let progress = monitor.baselineProgress {
-                ProgressView(value: progress)
-                    .frame(width: 70)
-                Button("Cancel") { monitor.cancelBaseline() }
+            HStack(spacing: 6) {
+                if let progress = monitor.baselineProgress {
+                    ProgressView(value: progress)
+                        .frame(width: 70)
+                    Button("Cancel") { monitor.cancelBaseline() }
+                        .controlSize(.small)
+                } else {
+                    Button(monitor.baseline == nil ? "Record baseline" : "Re-record baseline") {
+                        monitor.recordBaseline()
+                    }
                     .controlSize(.small)
-            } else {
-                Button(monitor.baseline == nil ? "Record baseline" : "Re-record baseline") {
-                    monitor.recordBaseline()
-                }
-                .controlSize(.small)
-                .help("Speak normally for \(Int(VoiceMonitor.baselineDuration)) seconds. Only summary numbers are kept, never audio.")
-                if monitor.baseline != nil {
+                    .help("Speak normally for \(Int(VoiceMonitor.baselineDuration)) seconds. Only summary numbers are kept, never audio.")
                     Button("Clear") { monitor.clearBaseline() }
                         .controlSize(.small)
+                        .disabled(monitor.baseline == nil)
                 }
             }
+            .frame(width: 190, alignment: .trailing)
         }
     }
 
@@ -135,8 +139,8 @@ struct IndicatorRow: View {
                     .lineLimit(1)
                     .frame(width: 170, alignment: .trailing)
             }
-            if let gauge = monitor.gauge(for: indicator) {
-                GaugeBar(value: gauge, target: monitor.targetRange(for: indicator))
+            if indicator == .resonance || indicator == .weight {
+                GaugeBar(value: monitor.gauge(for: indicator), target: monitor.targetRange(for: indicator))
             }
             HStack(spacing: 8) {
                 Text(detailText)
@@ -158,13 +162,14 @@ struct IndicatorRow: View {
         .accessibilityValue(valueText)
     }
 
-    @ViewBuilder private var statusDot: some View {
-        if let inRange = monitor.isInRange(indicator) {
-            Circle()
-                .fill(inRange ? Color.green : Color.orange)
-                .frame(width: 8, height: 8)
-                .accessibilityLabel(inRange ? "In target range" : "Outside target range")
-        }
+    private var statusDot: some View {
+        let inRange = monitor.isInRange(indicator)
+        return Circle()
+            .fill(inRange == true ? Color.green : Color.orange)
+            .frame(width: 8, height: 8)
+            .opacity(inRange == nil ? 0 : 1)
+            .accessibilityLabel(inRange == true ? "In target range" : "Outside target range")
+            .accessibilityHidden(inRange == nil)
     }
 
     private var valueText: String {
@@ -230,7 +235,7 @@ struct IndicatorRow: View {
 
 /// Thin horizontal gauge with an optional target band.
 struct GaugeBar: View {
-    let value: Double
+    let value: Double?
     let target: ClosedRange<Double>?
 
     var body: some View {
@@ -247,7 +252,8 @@ struct GaugeBar: View {
                 Circle()
                     .fill(.primary)
                     .frame(width: 10, height: 10)
-                    .offset(x: max(0, min(width - 10, width * value / 100 - 5)))
+                    .offset(x: max(0, min(width - 10, width * (value ?? 0) / 100 - 5)))
+                    .opacity(value == nil ? 0 : 1)
             }
         }
         .frame(height: 10)
