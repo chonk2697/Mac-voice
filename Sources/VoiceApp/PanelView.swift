@@ -108,7 +108,8 @@ struct PanelView: View {
             }
             .labelsHidden()
             .frame(maxWidth: .infinity)
-            Text(missing ? "using default" : (monitor.activeInputName ?? ""))
+            Text(missing ? "missing, using default"
+                 : (monitor.settings.inputDeviceUID == nil ? "default: \(monitor.activeInputName ?? "")" : (monitor.activeInputName ?? "")))
                 .font(.caption)
                 .foregroundStyle(.secondary)
                 .lineLimit(1)

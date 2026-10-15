@@ -215,15 +215,16 @@ final class VoiceMonitor {
     /// Five-second summary in the system log, so the pipeline can be checked
     /// without looking at the screen. Numbers only, never audio.
     private func logSummary() {
+        let device = capture?.liveDeviceName ?? "no capture"
         let voiced = session.recentMedian(.pitch, window: 5) != nil
         guard voiced else {
-            log.debug("Last 5 s: no voiced speech (level \(Int(self.level)) dB)")
+            log.info("Last 5 s: no voiced speech, level \(Int(self.level)) dB, device \(device, privacy: .public)")
             return
         }
         func m(_ metric: Metric) -> String {
             session.recentMedian(metric, window: 5).map { String(format: "%.1f", $0) } ?? "–"
         }
-        let text = "pitch \(m(.pitch)) Hz, F1-3 \(m(.f1))/\(m(.f2))/\(m(.f3)) Hz, VTL \(m(.vocalTractLength)) cm, H1-H2 \(m(.h1h2)) dB, alpha \(m(.alphaRatio)) dB"
+        let text = "pitch \(m(.pitch)) Hz, F1-3 \(m(.f1))/\(m(.f2))/\(m(.f3)) Hz, VTL \(m(.vocalTractLength)) cm, H1-H2 \(m(.h1h2)) dB, alpha \(m(.alphaRatio)) dB, device \(device)"
         log.info("Last 5 s medians: \(text, privacy: .public)")
     }
 

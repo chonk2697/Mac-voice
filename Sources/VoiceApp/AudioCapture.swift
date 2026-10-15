@@ -56,6 +56,15 @@ nonisolated final class AudioCapture: @unchecked Sendable {
         lock.withLock { running }
     }
 
+    /// The device the engine's input unit reports right now, read live.
+    var liveDeviceName: String? {
+        lock.withLock { engine.flatMap(AudioCapture.currentDevice(of:)).flatMap(AudioDevices.name(of:)) }
+    }
+
+    var isFollowingDefault: Bool {
+        lock.withLock { preferredDeviceUID == nil }
+    }
+
     /// True when a preferred device was requested but is not available, so
     /// the system default is in use instead.
     var isUsingFallback: Bool {
@@ -113,6 +122,13 @@ nonisolated final class AudioCapture: @unchecked Sendable {
 
             engine.inputNode.removeTap(onBus: 0)
             engine.stop()
+            if let uid = preferredDeviceUID, let wanted = AudioDevices.device(uid: uid),
+               AudioCapture.currentDevice(of: engine) != wanted.id, let unit = engine.inputNode.audioUnit {
+                var id = wanted.id
+                let status = AudioUnitSetProperty(unit, kAudioOutputUnitProperty_CurrentDevice, kAudioUnitScope_Global, 0,
+                                                  &id, UInt32(MemoryLayout<AudioDeviceID>.size))
+                log.notice("Engine had left \(wanted.name, privacy: .public); re-bound it (status \(status))")
+            }
             let format = engine.inputNode.inputFormat(forBus: 0)
             if format.sampleRate > 0, format.channelCount > 0 {
                 do {
