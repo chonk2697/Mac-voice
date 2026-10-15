@@ -23,6 +23,12 @@ nonisolated final class AudioCapture: @unchecked Sendable {
     private var running = false
     private var preferredDeviceUID: String?
     private var activeDeviceID: AudioDeviceID?
+    /// Serialises reactions to configuration changes so they cannot pile up.
+    private let changeQueue = DispatchQueue(label: "com.zoezyla.voice.capture")
+    private var recentRestarts: [Date] = []
+    /// More restarts than this within `restartWindow` means something is looping.
+    private let maxRestarts = 4
+    private let restartWindow: TimeInterval = 3
 
     init(handler: @escaping Handler) {
         self.handler = handler
@@ -43,6 +49,11 @@ nonisolated final class AudioCapture: @unchecked Sendable {
     /// Name of the device actually being captured, for display.
     var activeDeviceName: String? {
         lock.withLock { activeDeviceID.flatMap(AudioDevices.name(of:)) }
+    }
+
+    /// False once capture has stopped on its own, for example after looping restarts.
+    var isRunning: Bool {
+        lock.withLock { running }
     }
 
     /// True when a preferred device was requested but is not available, so
@@ -83,17 +94,56 @@ nonisolated final class AudioCapture: @unchecked Sendable {
         }
     }
 
-    private func restart() {
+    /// AVAudioEngine stops itself when its input configuration changes, which
+    /// also happens once right after we bind it to a non-default device. The
+    /// same engine is restarted with a fresh tap; only if that fails (device
+    /// unplugged) is everything rebuilt, which also resolves the fallback.
+    private func handleConfigurationChange() {
         lock.withLock {
-            guard running else { return }
+            guard running, let engine else { return }
+            let now = Date.now
+            recentRestarts = recentRestarts.filter { now.timeIntervalSince($0) < restartWindow }
+            recentRestarts.append(now)
+            guard recentRestarts.count <= maxRestarts else {
+                log.error("Capture restarted \(self.recentRestarts.count) times in \(Int(self.restartWindow)) s; stopping")
+                tearDown()
+                running = false
+                return
+            }
+
+            engine.inputNode.removeTap(onBus: 0)
+            engine.stop()
+            let format = engine.inputNode.inputFormat(forBus: 0)
+            if format.sampleRate > 0, format.channelCount > 0 {
+                do {
+                    try installTap(on: engine, format: format)
+                    try engine.start()
+                    activeDeviceID = AudioCapture.currentDevice(of: engine) ?? activeDeviceID
+                    let name = activeDeviceID.flatMap(AudioDevices.name(of:)) ?? "unknown device"
+                    log.info("Capture resumed on \(name, privacy: .public): \(Int(format.sampleRate)) Hz, \(format.channelCount) ch")
+                    return
+                } catch {
+                    log.notice("Resume failed (\(error.localizedDescription, privacy: .public)); rebuilding capture")
+                }
+            } else {
+                log.notice("Input format is empty after the change; rebuilding capture")
+            }
             tearDown()
             do {
                 try setUp()
             } catch {
                 running = false
-                log.error("Restart failed: \(error.localizedDescription, privacy: .public)")
+                log.error("Rebuild failed: \(error.localizedDescription, privacy: .public)")
             }
         }
+    }
+
+    private static func currentDevice(of engine: AVAudioEngine) -> AudioDeviceID? {
+        guard let unit = engine.inputNode.audioUnit else { return nil }
+        var id: AudioDeviceID = 0
+        var size = UInt32(MemoryLayout<AudioDeviceID>.size)
+        let status = AudioUnitGetProperty(unit, kAudioOutputUnitProperty_CurrentDevice, kAudioUnitScope_Global, 0, &id, &size)
+        return status == noErr && id != 0 ? id : nil
     }
 
     private func tearDown() {
@@ -134,6 +184,24 @@ nonisolated final class AudioCapture: @unchecked Sendable {
         guard inputFormat.sampleRate > 0, inputFormat.channelCount > 0 else {
             throw CaptureError.noInput
         }
+        try installTap(on: engine, format: inputFormat)
+
+        observer = NotificationCenter.default.addObserver(
+            forName: .AVAudioEngineConfigurationChange, object: engine, queue: nil
+        ) { [weak self] _ in
+            guard let self else { return }
+            log.info("Audio configuration changed")
+            changeQueue.async { self.handleConfigurationChange() }
+        }
+
+        engine.prepare()
+        try engine.start()
+        self.engine = engine
+        let name = activeDeviceID.flatMap(AudioDevices.name(of:)) ?? "unknown device"
+        log.info("Capturing \(name, privacy: .public): \(Int(inputFormat.sampleRate)) Hz, \(inputFormat.channelCount) ch, converting to 16 kHz mono")
+    }
+
+    private func installTap(on engine: AVAudioEngine, format inputFormat: AVAudioFormat) throws {
         guard let converter = AVAudioConverter(from: inputFormat, to: targetFormat) else {
             throw CaptureError.unsupportedFormat
         }
@@ -141,7 +209,7 @@ nonisolated final class AudioCapture: @unchecked Sendable {
         let target = targetFormat
         let handler = self.handler
 
-        input.installTap(onBus: 0, bufferSize: 1024, format: inputFormat) { buffer, _ in
+        engine.inputNode.installTap(onBus: 0, bufferSize: 1024, format: inputFormat) { buffer, _ in
             let capacity = AVAudioFrameCount(Double(buffer.frameLength) * ratio) + 64
             guard let output = AVAudioPCMBuffer(pcmFormat: target, frameCapacity: capacity) else { return }
             var consumed = false
@@ -158,20 +226,6 @@ nonisolated final class AudioCapture: @unchecked Sendable {
             guard error == nil, output.frameLength > 0, let channel = output.floatChannelData else { return }
             handler(Array(UnsafeBufferPointer(start: channel[0], count: Int(output.frameLength))))
         }
-
-        observer = NotificationCenter.default.addObserver(
-            forName: .AVAudioEngineConfigurationChange, object: engine, queue: nil
-        ) { [weak self] _ in
-            guard let self else { return }
-            log.info("Audio configuration changed; restarting capture")
-            DispatchQueue.global(qos: .userInitiated).async { self.restart() }
-        }
-
-        engine.prepare()
-        try engine.start()
-        self.engine = engine
-        let name = activeDeviceID.flatMap(AudioDevices.name(of:)) ?? "unknown device"
-        log.info("Capturing \(name, privacy: .public): \(Int(inputFormat.sampleRate)) Hz, \(inputFormat.channelCount) ch, converting to 16 kHz mono")
     }
 
     enum CaptureError: Error, LocalizedError {

@@ -152,11 +152,16 @@ final class VoiceMonitor {
     }
 
     func resume() {
-        guard state == .paused || state == .stopped else { return }
-        startCapture()
+        switch state {
+        case .paused, .stopped, .failed: startCapture()
+        default: return
+        }
     }
 
-    var isPaused: Bool { state == .paused }
+    var isPaused: Bool {
+        if case .failed = state { return true }
+        return state == .paused
+    }
 
     // MARK: Frames
 
@@ -183,6 +188,13 @@ final class VoiceMonitor {
         now = session.now
         ticks += 1
         if ticks % Int(VoiceMonitor.displayRate * 5) == 0 { logSummary() }
+        if ticks % Int(VoiceMonitor.displayRate) == 0, let capture {
+            activeInputName = capture.activeDeviceName
+            if !capture.isRunning, state == .listening || state == .idle {
+                state = .failed("Capture stopped; choose an input or press Resume")
+                self.capture = nil
+            }
+        }
         if let frame = session.lastFrame {
             level = frame.level
             isVoiced = frame.isVoiced && !session.current.isEmpty
