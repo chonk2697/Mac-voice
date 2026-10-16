@@ -71,9 +71,9 @@ final class StatusItemController {
 enum BarText {
     static let font = NSFont.monospacedSystemFont(ofSize: 11.5, weight: .medium)
 
-    /// Indicators shown in the bar, in display order.
+    /// Indicators shown in the bar. Independent of the panel's own toggles.
     static func indicators(for settings: AppSettings) -> Set<Indicator> {
-        settings.enabledIndicators.intersection(settings.barIndicators)
+        settings.barIndicators
     }
 
     /// A string with the same character count as any live readout for these indicators.
