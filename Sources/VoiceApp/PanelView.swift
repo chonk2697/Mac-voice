@@ -326,7 +326,9 @@ struct TimelineChart: View {
             }
         }
         .chartLegend(.hidden)
-        .clipped()
+        // Clip marks to the plot area only; the axis labels at the domain
+        // edges must stay free to extend past it.
+        .chartPlotStyle { plot in plot.clipped() }
     }
 
     private func displayValue(_ value: Double, _ metric: Metric) -> Double {
