@@ -34,6 +34,9 @@ struct SettingsView: View {
 
     var body: some View {
         Form {
+            Section("Indicators") {
+                IndicatorToggles(settings: settings)
+            }
             Section("Custom pitch target (Hz)") {
                 TextField("Low", value: $settings.customPitchLow, format: .number)
                 TextField("High", value: $settings.customPitchHigh, format: .number)

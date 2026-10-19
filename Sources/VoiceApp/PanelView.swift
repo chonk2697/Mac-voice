@@ -20,15 +20,13 @@ struct PanelView: View {
                 IndicatorRow(indicator: indicator, monitor: monitor)
             }
             if settings.enabledIndicators.isEmpty {
-                Text("No indicators enabled. Turn some on below.")
+                Text("No indicators enabled. Turn some on in Settings.")
                     .foregroundStyle(.secondary)
             }
 
             Divider()
             controls
             inputPicker
-            Divider()
-            IndicatorToggles(settings: settings)
             Divider()
             footer
         }
@@ -185,7 +183,7 @@ struct IndicatorRow: View {
                     .frame(width: 150, alignment: .trailing)
             }
             TimelineChart(indicator: indicator, monitor: monitor)
-                .frame(height: indicator == .formants ? 70 : 50)
+                .frame(height: indicator == .pitch ? 120 : (indicator == .formants ? 70 : 50))
         }
         .accessibilityElement(children: .combine)
         .accessibilityLabel(indicator.title)
@@ -315,12 +313,20 @@ struct TimelineChart: View {
         .chartYScale(domain: yDomain)
         .chartXAxis(.hidden)
         .chartYAxis {
-            AxisMarks(position: .trailing, values: .automatic(desiredCount: 3)) {
-                AxisGridLine()
-                AxisValueLabel().font(.system(size: 9))
+            if indicator == .pitch {
+                AxisMarks(position: .trailing, values: .stride(by: 100)) {
+                    AxisGridLine()
+                    AxisValueLabel().font(.system(size: 9))
+                }
+            } else {
+                AxisMarks(position: .trailing, values: .automatic(desiredCount: 3)) {
+                    AxisGridLine()
+                    AxisValueLabel().font(.system(size: 9))
+                }
             }
         }
         .chartLegend(.hidden)
+        .clipped()
     }
 
     private func displayValue(_ value: Double, _ metric: Metric) -> Double {
@@ -331,12 +337,24 @@ struct TimelineChart: View {
         }
     }
 
+    /// Pitch follows the data in 100 Hz steps: the bottom is the multiple of
+    /// 100 below the lowest shown value, the top the multiple above the
+    /// highest and never below 300. The target band counts as shown.
     private var yDomain: ClosedRange<Double> {
         switch indicator {
-        case .pitch: 60...400
-        case .formants: 0...4000
-        case .resonance, .weight: 0...100
-        case .brightness: -40...10
+        case .pitch:
+            var values = monitor.timelinePoints(.pitch).map(\.value)
+            if let current = monitor.current[.pitch] { values.append(current) }
+            if let target = monitor.targetRange(for: .pitch) {
+                values.append(target.lowerBound)
+                values.append(target.upperBound)
+            }
+            let bottom = max(0, (values.min().map { floor($0 / 100) * 100 }) ?? 0)
+            let top = max(300, bottom + 100, (values.max().map { ceil($0 / 100) * 100 }) ?? 300)
+            return bottom...top
+        case .formants: return 0...4000
+        case .resonance, .weight: return 0...100
+        case .brightness: return -40...10
         }
     }
 }
