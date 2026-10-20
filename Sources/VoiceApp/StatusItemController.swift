@@ -3,16 +3,22 @@ import SwiftUI
 import VoiceAnalysis
 
 /// The menu bar item: live compact readout, click to open the panel.
-final class StatusItemController {
+///
+/// The panel's SwiftUI hierarchy exists only while the popover is open. A
+/// hosting view that stays alive keeps observing the monitor and re-laying
+/// out the whole panel on every display tick even when nothing is on screen.
+final class StatusItemController: NSObject, NSPopoverDelegate {
     private let statusItem: NSStatusItem
     private let popover = NSPopover()
     private let monitor: VoiceMonitor
     private var refreshTask: Task<Void, Never>?
     private var sizedForIndicators: Set<Indicator>?
+    private var lastText: NSAttributedString?
 
     init(monitor: VoiceMonitor) {
         self.monitor = monitor
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
+        super.init()
 
         if let button = statusItem.button {
             button.image = NSImage(systemSymbolName: "waveform", accessibilityDescription: "Voice")
@@ -23,11 +29,9 @@ final class StatusItemController {
             button.setAccessibilityLabel("Voice indicators")
         }
 
-        let hosting = NSHostingController(rootView: PanelView(monitor: monitor))
-        hosting.sizingOptions = [.preferredContentSize]
-        popover.contentViewController = hosting
         popover.behavior = .transient
         popover.animates = false
+        popover.delegate = self
 
         render()
         refreshTask = Task { [weak self] in
@@ -43,9 +47,18 @@ final class StatusItemController {
         if popover.isShown {
             popover.performClose(nil)
         } else {
+            let hosting = NSHostingController(rootView: PanelView(monitor: monitor))
+            hosting.sizingOptions = [.preferredContentSize]
+            popover.contentViewController = hosting
+            monitor.isPanelVisible = true
             NSApp.activate()
             popover.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)
         }
+    }
+
+    func popoverDidClose(_ notification: Notification) {
+        monitor.isPanelVisible = false
+        popover.contentViewController = nil
     }
 
     private func render() {
@@ -62,6 +75,10 @@ final class StatusItemController {
             sizedForIndicators = indicators
         }
         let text = BarText.make(monitor: monitor)
+        // Assigning the title makes AppKit redraw the item; skip it when
+        // nothing changed, which is most ticks while nobody is speaking.
+        guard lastText == nil || !text.isEqual(to: lastText!) else { return }
+        lastText = text
         button.attributedTitle = text
         button.setAccessibilityValue(text.string)
     }

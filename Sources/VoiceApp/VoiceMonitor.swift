@@ -62,6 +62,8 @@ final class VoiceMonitor {
     private(set) var inputDevices: [AudioInputDevice] = []
     /// Name of the device being captured, for the panel.
     private(set) var activeInputName: String?
+    /// Set by the status item while the panel is open.
+    @ObservationIgnored var isPanelVisible = false
 
     private let engine = AnalysisEngine()
     @ObservationIgnored private var capture: AudioCapture?
