@@ -14,6 +14,10 @@ final class StatusItemController: NSObject, NSPopoverDelegate {
     private var refreshTask: Task<Void, Never>?
     private var sizedForIndicators: Set<Indicator>?
     private var lastText: NSAttributedString?
+    /// Every change to the item's title makes AppKit re-render it into the
+    /// menu bar, which costs several percent of a core at 15 Hz, so the bar
+    /// refreshes a little slower than the panel.
+    static let barRefreshRate = 8.0
 
     init(monitor: VoiceMonitor) {
         self.monitor = monitor
@@ -36,7 +40,7 @@ final class StatusItemController: NSObject, NSPopoverDelegate {
         render()
         refreshTask = Task { [weak self] in
             while !Task.isCancelled {
-                try? await Task.sleep(for: .milliseconds(Int(1000 / VoiceMonitor.displayRate)))
+                try? await Task.sleep(for: .milliseconds(Int(1000 / StatusItemController.barRefreshRate)))
                 self?.render()
             }
         }
@@ -48,7 +52,11 @@ final class StatusItemController: NSObject, NSPopoverDelegate {
             popover.performClose(nil)
         } else {
             let hosting = NSHostingController(rootView: PanelView(monitor: monitor))
-            hosting.sizingOptions = [.preferredContentSize]
+            // Size once on open rather than re-measuring the whole panel on
+            // every tick; the panel's layout only changes via Settings, and the
+            // popover closes before the user can get there.
+            hosting.sizingOptions = []
+            popover.contentSize = hosting.sizeThatFits(in: NSSize(width: 400, height: 2000))
             popover.contentViewController = hosting
             monitor.isPanelVisible = true
             NSApp.activate()
